@@ -1,0 +1,220 @@
+---
+title: "Data Science Capstone Project: Milestone Report"
+date: "May 25, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+# Task 0: Understanding the Problem 
+
+This document outlines the different steps taken to create a predictive Text Model and present it in the form of an app. The dataset used to create the model comes from the following source: 
+[Capstone Data](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip). 
+
+# Task 1: Getting and Cleaning the Data
+## Setting up the Environment
+```{r}
+library(tm)
+library(tokenizers)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(stringr)
+library(quanteda)
+library(NLP)
+library(rJava)
+library(RWeka)
+library(openNLP)
+```
+
+## Downloading the Data
+For the purposes of this course, only the English texts will be used to generate the model.
+
+```{r, cache=TRUE}
+# Downloading the dataset provided
+download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",destfile="Capstone_Dataset.zip")
+
+# Unzipping the folder
+unzip("Capstone_Dataset.zip")
+
+# Setting the working directory as the en_US folder
+setwd(file.path("./final/en_US"))
+
+list.files()
+```
+
+By downloading the data, we can see that there are 3 .txt datasets: *news, twitter*, and *blogs*. 
+
+## Preparing the data
+
+```{r, cache=TRUE}
+# Importing the datasets
+twitter <- readLines(file("./final/en_US/en_US.twitter.txt", "r"))
+news <- readLines(file("./final/en_US/en_US.news.txt", "r"))
+blog <- readLines(file("./final/en_US/en_US.blogs.txt", "r"))
+
+# Generating summary table of datasets
+dfsum <- as.data.frame(c("Twitter","News","Blog"))
+lines <- function(x) {
+    length(x)
+}
+words <- function(x) {
+    require(stringr)
+    sum(str_count(x))
+}
+size <- function(x) {
+    object.size(x)
+}
+
+dfsum$lines <- c(lines(twitter), lines(news), lines(blog))
+dfsum$words <- c(words(twitter), words(news), words(blog))
+dfsum$Size <- c(size(twitter), size(news), size(blog))
+colnames(dfsum) <- c("Text", "Lines", "Words", "Size (mb)")
+
+dfsum
+```
+
+Because these datasets are large, we can extract subsets of them to create a sample of all the texts. The datasets were combined into a single file then 5% of the text lines were extracted to form the sample text that will be used to create the models. I first attempted to create a dataset with 10% of the text but the object was too big. Hence, 5% of the data was used only.
+
+```{r, cache=TRUE}
+# Creating a sample from these datasets (5%)
+set.seed(444)
+Text <- c(twitter, news, blog)
+Text_Sample <- Text[which(rbinom(Text, 1, .05)==1)]
+
+# Sample statistics
+samplesum <- as.data.frame(c("Lines", "Words", "Size (mb)"))
+samplesum$Summary <- c(length(Text_Sample), sum(str_count(Text_Sample)), object.size(Text_Sample))
+colnames(samplesum) <- c("Summary", "")
+
+samplesum
+
+# Removing old datasets
+rm(list=c("blog", "news", "twitter"))
+```
+
+## Data Cleaning
+We need to remove profanities and tokenize the data.
+
+The dataset was cleaned using the steps outlined [here](https://www.youtube.com/watch?v=j1V2McKbkLo).
+
+A list of profanities was found [here](https://www.cs.cmu.edu/~biglou/resources/bad-words.txt) and was used to remove profanities in the texts. 
+
+```{r, cache=TRUE}
+
+cleancorpus <- function(dataset) {
+    # Turning the dataset into a corpus
+    text <- VCorpus(VectorSource(dataset))
+    
+    #Creating a function to remove special characters
+    toSpace <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+    
+    #Removing special characters
+    text <- tm_map(text, toSpace,"(f|ht)tp(s?)://(.*)[.][a-z]+")
+    text <- tm_map(text, toSpace, "@[^\\s]+")
+    text <- tm_map(text, toSpace, "\\b[A-Z a-z 0-9._ -]*[@](.*?)[.]{1,3} \\b")
+    
+    #Profanity filter
+    download.file("https://www.cs.cmu.edu/~biglou/resources/bad-words.txt", destfile = "Profanities.txt")
+    con <- file("Profanities.txt", open = "r")
+    profanity <- readLines(con, encoding = "UTF-8", skipNul = TRUE)
+    close(con)
+    profanity <- iconv(profanity, "latin1", "ASCII", sub = "")
+    text <- tm_map(text, removeWords, profanity)
+    
+    #Cleaning the corpus
+    text <- tm_map(text, tolower)
+    text <- tm_map(text, removeWords, stopwords("english"))
+    text <- tm_map(text, removePunctuation)
+    text <- tm_map(text, removeNumbers)
+    text <- tm_map(text, stripWhitespace)
+    text <- tm_map(text, PlainTextDocument)
+    return(text)
+}
+
+# Create the final corpus and save
+corpus <- cleancorpus(Text_Sample)
+saveRDS(corpus, file = "en_US.corpus.rds")
+
+# Turn the corpus into a dataframe
+corpusText <- data.frame(text = unlist(sapply(corpus, '[', "content")), stringsAsFactors = FALSE)
+con <- file("en_US.corpus.txt", open = "w")
+writeLines(corpusText$text, con)
+close(con)
+
+```
+
+
+# Task 2: Exploratory Analysis
+Before creating the prediction model, we need to create n-grams (1, 2, and 3) to see the most common combination of words.
+## Unigram
+```{r, cache = TRUE}
+#Unigram
+unigramToken <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+unigramMatrix <- TermDocumentMatrix(corpus, control = list(tokenize = unigramToken))
+unigramMatrixFreq <- sort(rowSums(as.matrix(removeSparseTerms(unigramMatrix, 0.99))), decreasing = TRUE)
+unigramMatrixFreq <- data.frame(word = names(unigramMatrixFreq), freq = unigramMatrixFreq)
+
+# Creating a plot with the most common unigrams
+uniplot <- ggplot(unigramMatrixFreq[1:20,], aes(x = reorder(word, -freq), y = freq)) + 
+    geom_bar(stat = "identity", fill = I("grey")) +
+    geom_text(aes(label = freq ), vjust = -0.20, size = 3) + 
+    xlab("") + 
+    ylab("Frequency") + 
+    theme(plot.title = element_text(size = 14, hjust = 0.5, vjust = 0.5),
+               axis.text.x = element_text(hjust = 1.0, angle = 45),
+               axis.text.y = element_text(hjust = 0.5, vjust = 0.5)) + 
+    ggtitle("20 Most Common Unigrams")
+
+print(uniplot)
+```
+
+
+## Bigram
+
+```{r, cache=TRUE}
+bigramToken <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+bigramMatrix <- TermDocumentMatrix(corpus, control = list(tokenize = bigramToken))
+bigramMatrixFreq <- sort(rowSums(as.matrix(removeSparseTerms(bigramMatrix, 0.999))), decreasing = TRUE)
+bigramMatrixFreq <- data.frame(word = names(bigramMatrixFreq), freq = bigramMatrixFreq)
+
+
+biplot <- ggplot(bigramMatrixFreq[1:20,], aes(x = reorder(word, -freq), y = freq)) + 
+    geom_bar(stat = "identity", fill = I("grey")) + 
+    geom_text(aes(label = freq ), vjust = -0.20, size = 3) + 
+    xlab("") + 
+    ylab("Frequency") + 
+    theme(plot.title = element_text(size = 14, hjust = 0.5, vjust = 0.5),
+               axis.text.x = element_text(hjust = 1.0, angle = 45),
+               axis.text.y = element_text(hjust = 0.5, vjust = 0.5)) + 
+    ggtitle("20 Most Common Bigrams")
+
+print(biplot)
+```
+
+## Trigram
+```{r, cache=TRUE}
+trigramToken <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+trigramMatrix <- TermDocumentMatrix(corpus, control = list(tokenize = trigramToken))
+trigramMatrixFreq <- sort(rowSums(as.matrix(removeSparseTerms(trigramMatrix, 0.9999))), decreasing = TRUE)
+trigramMatrixFreq <- data.frame(word = names(trigramMatrixFreq), freq = trigramMatrixFreq)
+
+# generate plot
+triplot <- ggplot(trigramMatrixFreq[1:20,], aes(x = reorder(word, -freq), y = freq)) + 
+    geom_bar(stat = "identity", fill = I("grey")) +
+    geom_text(aes(label = freq ), vjust = -0.20, size = 3) + 
+    xlab("") +
+    ylab("Frequency") + 
+    theme(plot.title = element_text(size = 14, hjust = 0.5, vjust = 0.5),
+               axis.text.x = element_text(hjust = 1.0, angle = 45),
+               axis.text.y = element_text(hjust = 0.5, vjust = 0.5)) + 
+    ggtitle("20 Most Common Trigrams")
+print(triplot)
+```
+
+# Next Steps
+The next steps of the Capstone project is to create a prediction model to predict the next word when a sentence is provided as an input. I will used the work I've already done for the exploratory analysis. 
+
+Once the model is created, I will be able to create an interactive Shiny app.
